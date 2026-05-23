@@ -27,7 +27,9 @@ Reads live data from `ss -tulpn`, persists metadata in SQLite, and lets you name
 
 ## Screenshots
 
-> _Dashboard showing tracked ports with scope badges, search bar, and inline edit forms._
+![Dashboard](assets/1.png)
+![Dashboard](assets/2.png)
+![Dashboard](assets/3.png)
 
 ---
 
