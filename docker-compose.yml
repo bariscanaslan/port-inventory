@@ -1,0 +1,31 @@
+services:
+  port-inventory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: port-inventory
+    restart: unless-stopped
+
+    network_mode: host
+    pid: host
+
+    user: root
+
+    environment:
+      PORT_INVENTORY_DIR: /data
+      PORT_INVENTORY_DB: /data/port_inventory.sqlite3
+
+      # Güvenli varsayılan:
+      # Sadece host içinden erişilir.
+      # Cloudflare Tunnel, Tailscale veya reverse proxy ile açmak için iyi.
+      PORT_INVENTORY_HOST: 0.0.0.0
+
+      # Direkt LAN'dan erişmek istersen 127.0.0.1 yerine 0.0.0.0 yap.
+      PORT_INVENTORY_PORT: 8710
+
+    volumes:
+      - ./data:/data
+
+    security_opt:
+      - no-new-privileges:true
