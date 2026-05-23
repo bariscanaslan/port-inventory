@@ -913,6 +913,16 @@ TEMPLATE = r"""
   var dirtyKeys = new Set();
 
   // ── Dirty tracking ──────────────────────────────────────────────────────
+
+  // key contains '|' which breaks CSS attribute selectors — use DOM iteration instead
+  function findFormByKey(key) {
+    var forms = document.querySelectorAll('.edit-form');
+    for (var i = 0; i < forms.length; i++) {
+      if (forms[i].dataset.key === key) return forms[i];
+    }
+    return null;
+  }
+
   function getSnapshot(form) {
     var fd = new FormData(form);
     return JSON.stringify({
@@ -921,7 +931,7 @@ TEMPLATE = r"""
       owner:    fd.get('owner') || '',
       exposure: fd.get('exposure') || '',
       notes:    fd.get('notes') || '',
-      ignored:  fd.get('ignored') === 'on',
+      ignored:  form.querySelector('input[name="ignored"]').checked,
     });
   }
 
@@ -975,7 +985,7 @@ TEMPLATE = r"""
 
     var payload = [];
     dirtyKeys.forEach(function(key) {
-      var form = document.querySelector('.edit-form[data-key="' + CSS.escape(key) + '"]');
+      var form = findFormByKey(key);
       if (!form) return;
       var fd = new FormData(form);
       payload.push({
@@ -985,7 +995,7 @@ TEMPLATE = r"""
         owner:    (fd.get('owner') || '').trim(),
         exposure: (fd.get('exposure') || '').trim(),
         notes:    (fd.get('notes') || '').trim(),
-        ignored:  fd.get('ignored') === 'on',
+        ignored:  form.querySelector('input[name="ignored"]').checked,
       });
     });
 
@@ -999,7 +1009,7 @@ TEMPLATE = r"""
       if (data.saved !== undefined) {
         // Reset snapshots for saved forms
         dirtyKeys.forEach(function(key) {
-          var form = document.querySelector('.edit-form[data-key="' + CSS.escape(key) + '"]');
+          var form = findFormByKey(key);
           if (!form) return;
           form._snapshot = getSnapshot(form);
           var saveBtn = form.querySelector('.row-save-btn');
