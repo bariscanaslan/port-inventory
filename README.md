@@ -36,7 +36,7 @@ Reads live data from `ss -tulpn`, persists metadata in SQLite, and lets you name
 ### Option 1 — Docker Compose (recommended)
 
 ```bash
-git clone https://github.com/your-username/port-inventory.git
+git clone https://github.com/bariscanaslan/port-inventory.git
 cd port-inventory
 docker compose up -d
 ```
@@ -52,7 +52,7 @@ Then open [http://localhost:8710](http://localhost:8710).
 **Requirements:** Python 3.10+, `iproute2` (`ss` command)
 
 ```bash
-git clone https://github.com/your-username/port-inventory.git
+git clone https://github.com/bariscanaslan/port-inventory.git
 cd port-inventory
 
 python3 -m venv venv
