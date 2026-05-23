@@ -42,7 +42,7 @@ from flask import Flask, redirect, render_template_string, request, url_for
 
 APP_DIR = Path(os.environ.get("PORT_INVENTORY_DIR", "/DATA/AppData/port-inventory"))
 DB_PATH = Path(os.environ.get("PORT_INVENTORY_DB", APP_DIR / "port_inventory.sqlite3"))
-HOST = os.environ.get("PORT_INVENTORY_HOST", "0.0.0.0")
+HOST = os.environ.get("PORT_INVENTORY_HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT_INVENTORY_PORT", "8710"))
 
 RESCAN_INTERVAL_SECONDS = int(os.environ.get("PORT_INVENTORY_RESCAN_INTERVAL", str(24 * 3600)))  # default: 24h
@@ -411,6 +411,7 @@ TEMPLATE = r"""
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Port Inventory</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMzIgMzIiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzBkMTUyMSIvPgogIDxyZWN0IHg9IjUiIHk9IjkiIHdpZHRoPSIyMiIgaGVpZ2h0PSIzIiByeD0iMS41IiBmaWxsPSIjNGZhY2RlIi8+CiAgPHJlY3QgeD0iNSIgeT0iMTQuNSIgd2lkdGg9IjE0IiBoZWlnaHQ9IjMiIHJ4PSIxLjUiIGZpbGw9IiMzZGQ2OGMiLz4KICA8cmVjdCB4PSI1IiB5PSIyMCIgd2lkdGg9IjE4IiBoZWlnaHQ9IjMiIHJ4PSIxLjUiIGZpbGw9IiM0ZmFjZGUiIG9wYWNpdHk9IjAuNSIvPgogIDxjaXJjbGUgY3g9IjI0IiBjeT0iMjMiIHI9IjUiIGZpbGw9IiMwZDE1MjEiIHN0cm9rZT0iIzRmYWNkZSIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8Y2lyY2xlIGN4PSIyNCIgY3k9IjIzIiByPSIyLjUiIGZpbGw9IiM0ZmFjZGUiLz4KPC9zdmc+">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
