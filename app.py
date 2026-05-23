@@ -263,6 +263,12 @@ def sort_rows(rows: list[sqlite3.Row], sort_by: str, direction: str) -> list[sql
     def text(value: object) -> str:
         return str(value or "").casefold()
 
+    def name_score(row: sqlite3.Row) -> tuple[int, str, int, str, str]:
+        # Unnamed rows sort after named rows in ASC mode
+        name = str(row["name"] or "").casefold()
+        unnamed = 1 if not name else 0
+        return (unnamed, name, int(row["port"]), text(row["proto"]), text(row["local_address"]))
+
     def metadata_score(row: sqlite3.Row) -> tuple[str, str, str, str, int, str, str]:
         return (
             text(row["category"]),
@@ -275,8 +281,9 @@ def sort_rows(rows: list[sqlite3.Row], sort_by: str, direction: str) -> list[sql
         )
 
     sorters = {
-        "port": lambda row: (int(row["port"]), text(row["proto"]), text(row["local_address"])),
-        "bind": lambda row: (text(row["local_address"]), int(row["port"]), text(row["proto"])),
+        "port":     lambda row: (int(row["port"]), text(row["proto"]), text(row["local_address"])),
+        "bind":     lambda row: (text(row["local_address"]), int(row["port"]), text(row["proto"])),
+        "name":     name_score,
         "metadata": metadata_score,
     }
     sorter = sorters.get(sort_by, sorters["port"])
@@ -339,7 +346,7 @@ def fmtdate_filter(iso_str: str) -> str:
 def index():
     sort_by = request.args.get("sort", "port")
     direction = request.args.get("dir", "asc")
-    if sort_by not in {"port", "bind", "metadata"}:
+    if sort_by not in {"port", "bind", "name", "metadata"}:
         sort_by = "port"
     if direction not in {"asc", "desc"}:
         direction = "asc"
@@ -349,7 +356,6 @@ def index():
     public_count = sum(1 for row in rows if classify_scope(row["local_address"]) == "Public bind" and not row["ignored"])
     ignored_count = sum(1 for row in rows if row["ignored"])
 
-    # Prepare rows as plain dicts so we can add formatted dates
     rows_data = []
     for row in rows:
         d = dict(row)
@@ -489,9 +495,7 @@ TEMPLATE = r"""
     }
     .header-left h1 {
       font-family: var(--mono);
-      font-size: 18px;
-      font-weight: 800;
-      letter-spacing: -.3px;
+      font-size: 18px; font-weight: 800; letter-spacing: -.3px;
       color: #fff;
       display: flex; align-items: center; gap: 8px;
     }
@@ -501,56 +505,27 @@ TEMPLATE = r"""
       box-shadow: 0 0 8px var(--ok);
       animation: pulse 2s ease-in-out infinite;
     }
-    @keyframes pulse {
-      0%,100% { opacity: 1; } 50% { opacity: .4; }
-    }
-    .header-left .sub {
-      font-size: 12px; color: var(--muted); margin-top: 3px;
-      font-family: var(--mono);
-    }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+    .header-left .sub { font-size: 12px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
     .stats { display: flex; gap: 10px; flex-wrap: wrap; }
     .stat {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 8px 14px;
-      min-width: 90px;
-      text-align: center;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 8px 14px; min-width: 90px; text-align: center;
     }
-    .stat strong {
-      font-family: var(--mono);
-      font-size: 20px; font-weight: 800;
-      display: block; color: #fff; line-height: 1.1;
-    }
+    .stat strong { font-family: var(--mono); font-size: 20px; font-weight: 800; display: block; color: #fff; line-height: 1.1; }
     .stat .label { font-size: 11px; color: var(--muted); margin-top: 2px; }
     .stat.warn strong { color: var(--warn); }
     .stat.danger strong { color: var(--danger); }
     .stat.purple strong { color: var(--purple); }
 
     /* ── Toolbar ── */
-    .toolbar {
-      display: flex; gap: 10px; align-items: center;
-      flex-wrap: wrap;
-      padding: 16px 28px 0;
-    }
-    .search-wrap {
-      position: relative; flex: 1; min-width: 200px; max-width: 360px;
-    }
-    .search-wrap svg {
-      position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
-      color: var(--muted); pointer-events: none;
-    }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 16px 28px 0; }
+    .search-wrap { position: relative; flex: 1; min-width: 200px; max-width: 360px; }
+    .search-wrap svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
     #search {
-      width: 100%;
-      background: var(--surface);
-      border: 1px solid var(--border2);
-      border-radius: 10px;
-      color: var(--text);
-      font-family: var(--mono);
-      font-size: 13px;
-      padding: 9px 12px 9px 34px;
-      outline: none;
-      transition: border-color .15s;
+      width: 100%; background: var(--surface); border: 1px solid var(--border2);
+      border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 13px;
+      padding: 9px 12px 9px 34px; outline: none; transition: border-color .15s;
     }
     #search:focus { border-color: var(--accent); }
     #search::placeholder { color: var(--muted); }
@@ -559,51 +534,33 @@ TEMPLATE = r"""
       display: inline-flex; align-items: center; gap: 6px;
       font-family: var(--sans); font-size: 13px; font-weight: 600;
       border: 1px solid var(--border2); border-radius: 10px;
-      padding: 8px 14px; cursor: pointer;
-      transition: all .15s; white-space: nowrap;
+      padding: 8px 14px; cursor: pointer; transition: all .15s; white-space: nowrap;
     }
     .btn-primary { background: var(--accent); color: #001828; border-color: var(--accent); }
     .btn-primary:hover { background: #6cc5ee; }
     .btn-ghost { background: var(--surface); color: var(--text); }
     .btn-ghost:hover { background: var(--panel); border-color: var(--accent); color: var(--accent); }
-    .btn-ghost.active {
-      background: rgba(155,109,255,.15);
-      border-color: var(--purple);
-      color: var(--purple);
-    }
+    .btn-ghost.active { background: rgba(155,109,255,.15); border-color: var(--purple); color: var(--purple); }
     .btn svg { flex-shrink: 0; }
 
     /* ── Sort bar ── */
-    .sort-bar {
-      padding: 12px 28px 0;
-      display: flex; gap: 6px; align-items: center;
-      flex-wrap: wrap;
-    }
+    .sort-bar { padding: 12px 28px 0; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
     .sort-label { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-right: 4px; }
     .sort-link {
-      font-size: 12px; font-weight: 600; font-family: var(--mono);
-      color: var(--muted);
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 7px; padding: 5px 10px;
-      text-decoration: none;
-      display: inline-flex; align-items: center; gap: 4px;
-      transition: all .15s;
+      font-size: 12px; font-weight: 600; font-family: var(--mono); color: var(--muted);
+      background: var(--surface); border: 1px solid var(--border); border-radius: 7px;
+      padding: 5px 10px; text-decoration: none;
+      display: inline-flex; align-items: center; gap: 4px; transition: all .15s;
     }
     .sort-link:hover { color: var(--text); border-color: var(--border2); }
     .sort-link.active { color: var(--accent); border-color: var(--accent2); background: rgba(79,172,222,.08); }
 
     /* ── Main ── */
     main { padding: 18px 28px 40px; }
-
     .error {
-      border: 1px solid rgba(240,104,128,.35);
-      background: rgba(240,104,128,.08);
-      color: #fca5b4;
-      padding: 12px 16px;
-      border-radius: 12px;
-      margin-bottom: 14px;
-      font-family: var(--mono);
-      font-size: 13px;
+      border: 1px solid rgba(240,104,128,.35); background: rgba(240,104,128,.08);
+      color: #fca5b4; padding: 12px 16px; border-radius: 12px; margin-bottom: 14px;
+      font-family: var(--mono); font-size: 13px;
     }
 
     /* ── Table ── */
@@ -614,119 +571,61 @@ TEMPLATE = r"""
       font-family: var(--mono); text-transform: uppercase; letter-spacing: .8px;
       padding: 4px 12px; text-align: left;
     }
-
-    tbody tr {
-      transition: opacity .2s;
-    }
+    tbody tr { transition: opacity .2s; }
     tbody tr td {
-      background: var(--panel);
-      border-top: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      padding: 14px 12px;
-      vertical-align: top;
+      background: var(--panel); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+      padding: 14px 12px; vertical-align: top;
     }
-    tbody tr td:first-child {
-      border-left: 1px solid var(--border);
-      border-radius: 12px 0 0 12px;
-    }
-    tbody tr td:last-child {
-      border-right: 1px solid var(--border);
-      border-radius: 0 12px 12px 0;
-    }
-    tbody tr:hover td {
-      background: #152030;
-      border-color: var(--border2);
-    }
+    tbody tr td:first-child { border-left: 1px solid var(--border); border-radius: 12px 0 0 12px; }
+    tbody tr td:last-child  { border-right: 1px solid var(--border); border-radius: 0 12px 12px 0; }
+    tbody tr:hover td { background: #152030; border-color: var(--border2); }
     tbody tr.ignored-row { opacity: .35; }
 
     /* ── Port cell ── */
-    .port-num {
-      font-family: var(--mono);
-      font-size: 26px; font-weight: 800;
-      color: var(--accent);
-      letter-spacing: -.5px;
-      line-height: 1;
-    }
+    .port-num { font-family: var(--mono); font-size: 26px; font-weight: 800; color: var(--accent); letter-spacing: -.5px; line-height: 1; }
     .proto-badge {
-      display: inline-block;
-      font-family: var(--mono);
-      font-size: 10px; font-weight: 600;
-      color: var(--muted);
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 5px;
-      padding: 2px 6px;
-      margin-top: 5px;
-      text-transform: uppercase;
+      display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 600;
+      color: var(--muted); background: var(--surface); border: 1px solid var(--border);
+      border-radius: 5px; padding: 2px 6px; margin-top: 5px; text-transform: uppercase;
     }
 
     /* ── Scope badges ── */
     .badge {
-      display: inline-flex; align-items: center; gap: 5px;
-      border-radius: 99px; padding: 4px 10px;
-      font-size: 11px; font-weight: 700;
-      font-family: var(--mono);
-      border: 1px solid var(--border);
-      color: var(--muted);
+      display: inline-flex; align-items: center; gap: 5px; border-radius: 99px; padding: 4px 10px;
+      font-size: 11px; font-weight: 700; font-family: var(--mono); border: 1px solid var(--border); color: var(--muted);
     }
     .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .6; }
-    .badge.public { color: var(--danger); border-color: rgba(240,104,128,.35); background: rgba(240,104,128,.07); }
-    .badge.loopback { color: var(--ok); border-color: rgba(61,214,140,.3); background: rgba(61,214,140,.07); }
-    .badge.tailscale { color: var(--purple); border-color: rgba(155,109,255,.3); background: rgba(155,109,255,.07); }
-    .badge.lan { color: var(--accent); border-color: rgba(79,172,222,.3); background: rgba(79,172,222,.07); }
+    .badge.public    { color: var(--danger); border-color: rgba(240,104,128,.35); background: rgba(240,104,128,.07); }
+    .badge.loopback  { color: var(--ok);     border-color: rgba(61,214,140,.3);   background: rgba(61,214,140,.07); }
+    .badge.tailscale { color: var(--purple); border-color: rgba(155,109,255,.3);  background: rgba(155,109,255,.07); }
+    .badge.lan       { color: var(--accent); border-color: rgba(79,172,222,.3);   background: rgba(79,172,222,.07); }
 
     /* ── Name cell ── */
-    .port-name { font-size: 15px; font-weight: 600; color: #fff; }
+    .port-name    { font-size: 15px; font-weight: 600; color: #fff; }
     .port-unnamed { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--warn); }
-    .process-hint {
-      font-family: var(--mono); font-size: 11px; color: var(--muted);
-      margin-top: 5px;
-    }
-    .addr-mono {
-      font-family: var(--mono); font-size: 12px; color: var(--text);
-    }
+    .process-hint { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 5px; }
+    .addr-mono    { font-family: var(--mono); font-size: 12px; color: var(--text); }
 
     /* ── Meta cell ── */
-    .meta-row { display: flex; gap: 6px; align-items: baseline; font-size: 12px; margin-top: 3px; }
-    .meta-key { color: var(--muted); font-family: var(--mono); font-size: 11px; }
-    .meta-val { color: var(--text); font-weight: 500; }
+    .meta-row  { display: flex; gap: 6px; align-items: baseline; font-size: 12px; margin-top: 3px; }
+    .meta-key  { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+    .meta-val  { color: var(--text); font-weight: 500; }
     .meta-date { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 
     /* ── Form ── */
     .edit-form {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(120px, 1fr));
-      gap: 7px;
-      min-width: 380px;
+      display: grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 7px; min-width: 380px;
     }
-    .edit-form input,
-    .edit-form select,
-    .edit-form textarea {
-      width: 100%;
-      background: #0a111d;
-      color: var(--text);
-      border: 1px solid var(--border2);
-      border-radius: 8px;
-      padding: 7px 10px;
-      font-family: var(--sans);
-      font-size: 12px;
-      outline: none;
-      transition: border-color .15s;
+    .edit-form input, .edit-form select, .edit-form textarea {
+      width: 100%; background: #0a111d; color: var(--text); border: 1px solid var(--border2);
+      border-radius: 8px; padding: 7px 10px; font-family: var(--sans); font-size: 12px;
+      outline: none; transition: border-color .15s;
     }
-    .edit-form input:focus,
-    .edit-form select:focus,
-    .edit-form textarea:focus { border-color: var(--accent); }
-    .edit-form input::placeholder,
-    .edit-form textarea::placeholder { color: var(--muted); }
+    .edit-form input:focus, .edit-form select:focus, .edit-form textarea:focus { border-color: var(--accent); }
+    .edit-form input::placeholder, .edit-form textarea::placeholder { color: var(--muted); }
     .edit-form textarea { grid-column: 1 / -1; min-height: 52px; resize: vertical; }
-    .form-actions {
-      grid-column: 1 / -1;
-      display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    }
-    .ignore-label {
-      display: flex; align-items: center; gap: 7px;
-      font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer;
-    }
+    .form-actions { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .ignore-label { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; }
     .ignore-label input[type=checkbox] { accent-color: var(--purple); width: 14px; height: 14px; }
 
     /* ── Proto filters ── */
@@ -735,11 +634,7 @@ TEMPLATE = r"""
     .proto-filters .btn.active { background: rgba(79,172,222,.12); border-color: var(--accent2); color: var(--accent); }
 
     /* ── No results ── */
-    #no-results {
-      display: none; text-align: center;
-      padding: 60px 0;
-      color: var(--muted); font-family: var(--mono); font-size: 14px;
-    }
+    #no-results { display: none; text-align: center; padding: 60px 0; color: var(--muted); font-family: var(--mono); font-size: 14px; }
 
     /* ── Responsive ── */
     @media (max-width: 900px) {
@@ -758,28 +653,16 @@ TEMPLATE = r"""
     <div class="sub">ss -tulpn · auto-rescan every {{ rescan_interval_h }}h</div>
   </div>
   <div class="stats">
-    <div class="stat">
-      <strong>{{ rows|length }}</strong>
-      <div class="label">Tracked</div>
-    </div>
-    <div class="stat warn">
-      <strong>{{ unnamed_count }}</strong>
-      <div class="label">Unnamed</div>
-    </div>
-    <div class="stat danger">
-      <strong>{{ public_count }}</strong>
-      <div class="label">Public</div>
-    </div>
-    <div class="stat purple">
-      <strong>{{ ignored_count }}</strong>
-      <div class="label">Ignored</div>
-    </div>
+    <div class="stat"><strong>{{ rows|length }}</strong><div class="label">Tracked</div></div>
+    <div class="stat warn"><strong>{{ unnamed_count }}</strong><div class="label">Unnamed</div></div>
+    <div class="stat danger"><strong>{{ public_count }}</strong><div class="label">Public</div></div>
+    <div class="stat purple"><strong>{{ ignored_count }}</strong><div class="label">Ignored</div></div>
   </div>
 </header>
 
 <div class="toolbar">
   <div class="search-wrap">
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
       <circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5"/>
       <path d="M10 10L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
     </svg>
@@ -787,18 +670,18 @@ TEMPLATE = r"""
   </div>
 
   <div class="proto-filters">
-    <button class="btn btn-ghost active" id="filter-all"  onclick="setProtoFilter('all')">All</button>
-    <button class="btn btn-ghost"        id="filter-tcp"  onclick="setProtoFilter('tcp')">TCP</button>
-    <button class="btn btn-ghost"        id="filter-udp"  onclick="setProtoFilter('udp')">UDP</button>
+    <button class="btn btn-ghost active" id="filter-all" onclick="setProtoFilter('all')">All</button>
+    <button class="btn btn-ghost"        id="filter-tcp" onclick="setProtoFilter('tcp')">TCP</button>
+    <button class="btn btn-ghost"        id="filter-udp" onclick="setProtoFilter('udp')">UDP</button>
   </div>
 
-  <button id="toggle-ignored" class="btn btn-ghost" onclick="toggleIgnored()" title="Show/hide ignored ports">
+  <button id="toggle-ignored" class="btn btn-ghost" onclick="toggleIgnored()">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3C4 3 1 8 1 8s3 5 7 5 7-5 7-5-3-5-7-5zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/><circle cx="8" cy="8" r="1.5"/></svg>
     Show Ignored
     <span id="ignored-badge" style="background:rgba(155,109,255,.2);color:var(--purple);border-radius:99px;padding:1px 7px;font-size:11px;font-weight:700;">{{ ignored_count }}</span>
   </button>
 
-  <button id="save-all-btn" class="btn btn-primary" onclick="saveAll()" disabled style="opacity:.4;position:relative;">
+  <button id="save-all-btn" class="btn btn-primary" onclick="saveAll()" disabled style="opacity:.4;">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h9l3 3v9a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm7 0v4H4V2m5 9a2 2 0 1 1-4 0 2 2 0 0 1 4 0z"/></svg>
     Save All
     <span id="dirty-badge" style="display:none;background:rgba(0,0,0,.3);border-radius:99px;padding:1px 7px;font-size:11px;font-weight:700;margin-left:2px;">0</span>
@@ -824,6 +707,7 @@ TEMPLATE = r"""
   {%- endmacro %}
   {{ sort_link('Port', 'port') }}
   {{ sort_link('Bind address', 'bind') }}
+  {{ sort_link('Service name', 'name') }}
   {{ sort_link('Metadata', 'metadata') }}
 </div>
 
@@ -857,18 +741,15 @@ TEMPLATE = r"""
           <td>
             <div class="addr-mono" style="margin-bottom:8px;">{{ row.local_address }}</div>
             <span class="badge
-              {{ 'public' if scope == 'Public bind'
-                 else 'loopback' if scope == 'Loopback'
+              {{ 'public'    if scope == 'Public bind'
+                 else 'loopback'  if scope == 'Loopback'
                  else 'tailscale' if scope == 'Tailscale/CGNAT'
-                 else 'lan' if scope in ('LAN/private',)
+                 else 'lan'       if scope == 'LAN/private'
                  else '' }}">{{ scope }}</span>
           </td>
           <td>
-            {% if row.name %}
-              <div class="port-name">{{ row.name }}</div>
-            {% else %}
-              <div class="port-unnamed">Unnamed</div>
-            {% endif %}
+            {% if row.name %}<div class="port-name">{{ row.name }}</div>
+            {% else %}<div class="port-unnamed">Unnamed</div>{% endif %}
             <div class="process-hint">{{ row.process_hint or 'Process hidden / unknown' }}</div>
           </td>
           <td>
@@ -912,9 +793,7 @@ TEMPLATE = r"""
   var protoFilter = 'all';
   var dirtyKeys = new Set();
 
-  // ── Dirty tracking ──────────────────────────────────────────────────────
-
-  // key contains '|' which breaks CSS attribute selectors — use DOM iteration instead
+  // ── Helpers ───────────────────────────────────────────────────────────────
   function findFormByKey(key) {
     var forms = document.querySelectorAll('.edit-form');
     for (var i = 0; i < forms.length; i++) {
@@ -935,11 +814,11 @@ TEMPLATE = r"""
     });
   }
 
+  // ── Dirty tracking ────────────────────────────────────────────────────────
   function initDirtyTracking() {
     document.querySelectorAll('.edit-form').forEach(function(form) {
       form._snapshot = getSnapshot(form);
-      var fields = form.querySelectorAll('input,select,textarea');
-      fields.forEach(function(field) {
+      form.querySelectorAll('input,select,textarea').forEach(function(field) {
         field.addEventListener('input',  function() { markDirty(form); });
         field.addEventListener('change', function() { markDirty(form); });
       });
@@ -965,23 +844,19 @@ TEMPLATE = r"""
     var badge = document.getElementById('dirty-badge');
     var count = dirtyKeys.size;
     if (count > 0) {
-      btn.disabled = false;
-      btn.style.opacity = '1';
-      badge.style.display = 'inline';
-      badge.textContent = count;
+      btn.disabled = false; btn.style.opacity = '1';
+      badge.style.display = 'inline'; badge.textContent = count;
     } else {
-      btn.disabled = true;
-      btn.style.opacity = '.4';
+      btn.disabled = true; btn.style.opacity = '.4';
       badge.style.display = 'none';
     }
   }
 
-  // ── Save All ─────────────────────────────────────────────────────────────
+  // ── Save All ──────────────────────────────────────────────────────────────
   function saveAll() {
     if (dirtyKeys.size === 0) return;
     var btn = document.getElementById('save-all-btn');
-    btn.disabled = true;
-    btn.style.opacity = '.6';
+    btn.disabled = true; btn.style.opacity = '.6';
 
     var payload = [];
     dirtyKeys.forEach(function(key) {
@@ -1007,7 +882,6 @@ TEMPLATE = r"""
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.saved !== undefined) {
-        // Reset snapshots for saved forms
         dirtyKeys.forEach(function(key) {
           var form = findFormByKey(key);
           if (!form) return;
@@ -1021,8 +895,7 @@ TEMPLATE = r"""
       }
     })
     .catch(function() {
-      btn.disabled = false;
-      btn.style.opacity = '1';
+      btn.disabled = false; btn.style.opacity = '1';
       alert('Save failed — check console.');
     });
   }
@@ -1060,26 +933,20 @@ TEMPLATE = r"""
     var q = document.getElementById('search').value.toLowerCase().trim();
     var rows = document.querySelectorAll('#port-table tbody tr');
     var visible = 0;
-
     rows.forEach(function(row) {
       var ignored = row.dataset.ignored === '1';
       var proto   = row.dataset.proto || '';
-
-      if (ignored && !showIgnored) { row.style.display = 'none'; return; }
-      if (protoFilter !== 'all' && proto !== protoFilter) { row.style.display = 'none'; return; }
-      if (q && (row.dataset.search || '').indexOf(q) === -1) { row.style.display = 'none'; return; }
-
+      if (ignored && !showIgnored)                                          { row.style.display = 'none'; return; }
+      if (protoFilter !== 'all' && proto !== protoFilter)                   { row.style.display = 'none'; return; }
+      if (q && (row.dataset.search || '').indexOf(q) === -1)               { row.style.display = 'none'; return; }
       row.style.display = '';
       visible++;
     });
-
     document.getElementById('no-results').style.display =
       (visible === 0 && (q || protoFilter !== 'all')) ? 'block' : 'none';
   }
 
   document.getElementById('search').addEventListener('input', applyFilter);
-
-  // Init on load
   applyFilter();
   initDirtyTracking();
 </script>
