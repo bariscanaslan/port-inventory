@@ -394,6 +394,37 @@ def update(key: str):
     return redirect(url_for("index"))
 
 
+@app.post("/update-batch")
+def update_batch():
+    """Save multiple rows at once. Expects JSON: [{key, name, category, owner, exposure, notes, ignored}, ...]"""
+    from flask import jsonify
+    payload = request.get_json(force=True, silent=True)
+    if not payload or not isinstance(payload, list):
+        return jsonify({"error": "invalid payload"}), 400
+    with get_db() as db:
+        for item in payload:
+            key = item.get("key", "").strip()
+            if not key:
+                continue
+            db.execute(
+                """
+                UPDATE port_metadata
+                SET name = ?, category = ?, owner = ?, exposure = ?, notes = ?, ignored = ?
+                WHERE key = ?
+                """,
+                (
+                    item.get("name", "").strip(),
+                    item.get("category", "").strip(),
+                    item.get("owner", "").strip(),
+                    item.get("exposure", "").strip(),
+                    item.get("notes", "").strip(),
+                    1 if item.get("ignored") else 0,
+                    key,
+                ),
+            )
+    return jsonify({"saved": len(payload)})
+
+
 @app.post("/rescan")
 def rescan():
     sort_by = request.form.get("sort", "port")
@@ -698,6 +729,11 @@ TEMPLATE = r"""
     }
     .ignore-label input[type=checkbox] { accent-color: var(--purple); width: 14px; height: 14px; }
 
+    /* ── Proto filters ── */
+    .proto-filters { display: flex; gap: 4px; }
+    .proto-filters .btn { padding: 7px 12px; font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: .4px; }
+    .proto-filters .btn.active { background: rgba(79,172,222,.12); border-color: var(--accent2); color: var(--accent); }
+
     /* ── No results ── */
     #no-results {
       display: none; text-align: center;
@@ -750,16 +786,28 @@ TEMPLATE = r"""
     <input id="search" type="search" placeholder="Search ports, names, processes…" autocomplete="off">
   </div>
 
+  <div class="proto-filters">
+    <button class="btn btn-ghost active" id="filter-all"  onclick="setProtoFilter('all')">All</button>
+    <button class="btn btn-ghost"        id="filter-tcp"  onclick="setProtoFilter('tcp')">TCP</button>
+    <button class="btn btn-ghost"        id="filter-udp"  onclick="setProtoFilter('udp')">UDP</button>
+  </div>
+
   <button id="toggle-ignored" class="btn btn-ghost" onclick="toggleIgnored()" title="Show/hide ignored ports">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3C4 3 1 8 1 8s3 5 7 5 7-5 7-5-3-5-7-5zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/><circle cx="8" cy="8" r="1.5"/></svg>
     Show Ignored
     <span id="ignored-badge" style="background:rgba(155,109,255,.2);color:var(--purple);border-radius:99px;padding:1px 7px;font-size:11px;font-weight:700;">{{ ignored_count }}</span>
   </button>
 
+  <button id="save-all-btn" class="btn btn-primary" onclick="saveAll()" disabled style="opacity:.4;position:relative;">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h9l3 3v9a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm7 0v4H4V2m5 9a2 2 0 1 1-4 0 2 2 0 0 1 4 0z"/></svg>
+    Save All
+    <span id="dirty-badge" style="display:none;background:rgba(0,0,0,.3);border-radius:99px;padding:1px 7px;font-size:11px;font-weight:700;margin-left:2px;">0</span>
+  </button>
+
   <form action="/rescan" method="post" style="display:contents">
     <input type="hidden" name="sort" value="{{ sort_by }}">
     <input type="hidden" name="dir" value="{{ direction }}">
-    <button type="submit" class="btn btn-primary">
+    <button type="submit" class="btn btn-ghost">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.65 2.35A8 8 0 1 0 15 8h-2a6 6 0 1 1-1.05-3.35L10 7h5V2l-1.35.35z"/></svg>
       Rescan
     </button>
@@ -799,6 +847,7 @@ TEMPLATE = r"""
         <tr
           class="{{ 'ignored-row' if row.ignored else '' }}"
           data-ignored="{{ '1' if row.ignored else '0' }}"
+          data-proto="{{ row.proto | lower }}"
           data-search="{{ (row.port | string + ' ' + row.proto + ' ' + row.local_address + ' ' + (row.name or '') + ' ' + (row.category or '') + ' ' + (row.owner or '') + ' ' + (row.process_hint or '') + ' ' + (row.notes or '')) | lower }}"
         >
           <td>
@@ -831,7 +880,7 @@ TEMPLATE = r"""
             {% if row.notes %}<div style="margin-top:8px;font-size:12px;color:var(--text);">{{ row.notes }}</div>{% endif %}
           </td>
           <td>
-            <form class="edit-form" method="post" action="{{ url_for('update', key=row.key) }}">
+            <form class="edit-form" method="post" action="{{ url_for('update', key=row.key) }}" data-key="{{ row.key }}">
               <input name="name" value="{{ row.name }}" placeholder="Name (e.g. Nginx)">
               <input name="category" value="{{ row.category }}" placeholder="Category (e.g. Web)">
               <input name="owner" value="{{ row.owner }}" placeholder="Owner (e.g. Docker)">
@@ -846,7 +895,7 @@ TEMPLATE = r"""
                   <input type="checkbox" name="ignored" {% if row.ignored %}checked{% endif %}>
                   Ignore
                 </label>
-                <button type="submit" class="btn btn-primary" style="padding:7px 14px;font-size:12px;">Save</button>
+                <button type="submit" class="btn btn-primary row-save-btn" style="padding:7px 14px;font-size:12px;">Save</button>
               </div>
             </form>
           </td>
@@ -860,6 +909,129 @@ TEMPLATE = r"""
 
 <script>
   var showIgnored = false;
+  var protoFilter = 'all';
+  var dirtyKeys = new Set();
+
+  // ── Dirty tracking ──────────────────────────────────────────────────────
+  function getSnapshot(form) {
+    var fd = new FormData(form);
+    return JSON.stringify({
+      name:     fd.get('name') || '',
+      category: fd.get('category') || '',
+      owner:    fd.get('owner') || '',
+      exposure: fd.get('exposure') || '',
+      notes:    fd.get('notes') || '',
+      ignored:  fd.get('ignored') === 'on',
+    });
+  }
+
+  function initDirtyTracking() {
+    document.querySelectorAll('.edit-form').forEach(function(form) {
+      form._snapshot = getSnapshot(form);
+      var fields = form.querySelectorAll('input,select,textarea');
+      fields.forEach(function(field) {
+        field.addEventListener('input',  function() { markDirty(form); });
+        field.addEventListener('change', function() { markDirty(form); });
+      });
+    });
+  }
+
+  function markDirty(form) {
+    var key = form.dataset.key;
+    var isDirty = getSnapshot(form) !== form._snapshot;
+    var saveBtn = form.querySelector('.row-save-btn');
+    if (isDirty) {
+      dirtyKeys.add(key);
+      if (saveBtn) { saveBtn.textContent = 'Save *'; saveBtn.style.background = 'var(--warn)'; saveBtn.style.color = '#1a0e00'; saveBtn.style.borderColor = 'var(--warn)'; }
+    } else {
+      dirtyKeys.delete(key);
+      if (saveBtn) { saveBtn.textContent = 'Save'; saveBtn.style.background = ''; saveBtn.style.color = ''; saveBtn.style.borderColor = ''; }
+    }
+    updateSaveAllBtn();
+  }
+
+  function updateSaveAllBtn() {
+    var btn   = document.getElementById('save-all-btn');
+    var badge = document.getElementById('dirty-badge');
+    var count = dirtyKeys.size;
+    if (count > 0) {
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      badge.style.display = 'inline';
+      badge.textContent = count;
+    } else {
+      btn.disabled = true;
+      btn.style.opacity = '.4';
+      badge.style.display = 'none';
+    }
+  }
+
+  // ── Save All ─────────────────────────────────────────────────────────────
+  function saveAll() {
+    if (dirtyKeys.size === 0) return;
+    var btn = document.getElementById('save-all-btn');
+    btn.disabled = true;
+    btn.style.opacity = '.6';
+
+    var payload = [];
+    dirtyKeys.forEach(function(key) {
+      var form = document.querySelector('.edit-form[data-key="' + CSS.escape(key) + '"]');
+      if (!form) return;
+      var fd = new FormData(form);
+      payload.push({
+        key:      key,
+        name:     (fd.get('name') || '').trim(),
+        category: (fd.get('category') || '').trim(),
+        owner:    (fd.get('owner') || '').trim(),
+        exposure: (fd.get('exposure') || '').trim(),
+        notes:    (fd.get('notes') || '').trim(),
+        ignored:  fd.get('ignored') === 'on',
+      });
+    });
+
+    fetch('/update-batch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.saved !== undefined) {
+        // Reset snapshots for saved forms
+        dirtyKeys.forEach(function(key) {
+          var form = document.querySelector('.edit-form[data-key="' + CSS.escape(key) + '"]');
+          if (!form) return;
+          form._snapshot = getSnapshot(form);
+          var saveBtn = form.querySelector('.row-save-btn');
+          if (saveBtn) { saveBtn.textContent = 'Save'; saveBtn.style.background = ''; saveBtn.style.color = ''; saveBtn.style.borderColor = ''; }
+        });
+        dirtyKeys.clear();
+        updateSaveAllBtn();
+        flashSaved(btn);
+      }
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      alert('Save failed — check console.');
+    });
+  }
+
+  function flashSaved(btn) {
+    var orig = btn.innerHTML;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 8l4 4 8-8" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg> Saved!';
+    btn.style.opacity = '1';
+    setTimeout(function() { btn.innerHTML = orig; updateSaveAllBtn(); }, 1800);
+  }
+
+  // ── Filters ───────────────────────────────────────────────────────────────
+  function setProtoFilter(proto) {
+    protoFilter = proto;
+    ['all','tcp','udp'].forEach(function(p) {
+      document.getElementById('filter-' + p).classList.toggle('active', p === proto);
+    });
+    applyFilter();
+  }
 
   function toggleIgnored() {
     showIgnored = !showIgnored;
@@ -881,37 +1053,25 @@ TEMPLATE = r"""
 
     rows.forEach(function(row) {
       var ignored = row.dataset.ignored === '1';
+      var proto   = row.dataset.proto || '';
 
-      // Hide ignored rows unless toggle is on
-      if (ignored && !showIgnored) {
-        row.style.display = 'none';
-        return;
-      }
-
-      // Search filter
-      if (q) {
-        var text = row.dataset.search || '';
-        if (text.indexOf(q) === -1) {
-          row.style.display = 'none';
-          return;
-        }
-      }
+      if (ignored && !showIgnored) { row.style.display = 'none'; return; }
+      if (protoFilter !== 'all' && proto !== protoFilter) { row.style.display = 'none'; return; }
+      if (q && (row.dataset.search || '').indexOf(q) === -1) { row.style.display = 'none'; return; }
 
       row.style.display = '';
       visible++;
     });
 
-    // Show "no results" message when search yields nothing
-    var noRes = document.getElementById('no-results');
-    // count all non-ignored displayed
-    var totalNonIgnored = Array.from(rows).filter(function(r){ return r.dataset.ignored !== '1'; }).length;
-    noRes.style.display = (q && visible === 0) ? 'block' : 'none';
+    document.getElementById('no-results').style.display =
+      (visible === 0 && (q || protoFilter !== 'all')) ? 'block' : 'none';
   }
 
   document.getElementById('search').addEventListener('input', applyFilter);
 
-  // Run once on load to hide ignored rows by default
+  // Init on load
   applyFilter();
+  initDirtyTracking();
 </script>
 
 </body>
