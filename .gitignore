@@ -3,3 +3,5 @@ data/
 __pycache__/
 venv/
 *.pyc
+.pytest_cache/
+tests/ui/node_modules/

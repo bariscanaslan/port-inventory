@@ -1,0 +1,14 @@
+{
+  "name": "port-inventory-ui-tests",
+  "private": true,
+  "description": "jsdom tests for the Port Inventory page; dev only, not needed at runtime",
+  "scripts": {
+    "test": "node run.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  }
+}

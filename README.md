@@ -13,23 +13,24 @@ Reads live data from `ss -tulpn`, persists metadata in SQLite, and lets you name
 
 ## Features
 
-- **Live scan** — reads `ss -tulpn` on every page load and on a configurable auto-rescan schedule
-- **Classify ports** — assign name, category, owner, exposure level, and notes to each port
-- **Scope detection** — automatically labels ports as Public bind, Loopback, LAN/private, Tailscale/CGNAT, or Specific IP
-- **Search** — instant client-side search across port number, name, process, category, notes
-- **Sort** — sort by port number, bind address, or metadata
-- **Ignored ports** — mark noisy/known ports as ignored; hidden by default, togglable
-- **Timestamps** — tracks `first_seen` and `last_seen` for every port
-- **Auto-rescan** — background thread rescans on a configurable interval (default: 24h)
-- **Persistent storage** — SQLite database, survives restarts
+- **One row per service.** Every bind of the same port/protocol (`0.0.0.0` + `::`, or a wildcard plus a loopback bind) is grouped into one row, with a chip per bind address colored by scope: public, LAN, loopback, Tailscale.
+- **Auto-naming.** Well-known ports (SSH, DNS, HTTP(S), PostgreSQL, Redis, WireGuard, …) are named and categorized the first time they're seen. Anything you type yourself is never overwritten.
+- **Duplicate-bind detection.** After every scan, the widest bind that is listening becomes the group's primary. Other listening binds are marked as duplicates and shown as faded chips. This is tracked separately from your own *Ignore*: if the primary stops listening, the next listening bind takes over at full opacity.
+- **Categories.** 18 built-in categories plus your own. Create one from the category popover, and delete it again once no port uses it. Each category gets a stable color.
+- **Fast editing.** Click a service name to rename it inline (Enter saves, Esc cancels). Click the category chip to change it. Every change saves immediately and shows a toast with **Undo**.
+- **Details drawer.** Click a row for notes (saved when you leave the field), the ignore toggle, every bind with its scope and status, the full process string, and the raw `ss` lines with a copy button. The drawer is linked from the URL (`#tcp-22`), so links and reloads reopen it.
+- **Bulk actions.** Tick rows, or use the header checkbox to select all visible rows, then set a category, ignore or unignore them all at once.
+- **Filtering and sorting.** The stat cards (Total, Unnamed, Public, New, Ignored) double as filters. There is also search, a TCP/UDP switch, a category multi-select and a scope filter, plus sortable column headers. Filters, sort order and theme are remembered in the browser.
+- **Keyboard shortcuts.** `/` search · `j`/`k` move · `Enter` details · `e` rename · `i` ignore · `x` select · `Esc` close or clear · `?` show the list.
+- **Light and dark themes.** Applied before first paint, so there's no flash on load.
+- **Background rescans.** `ss -tulpn` runs at startup and on a configurable interval (default 24h). Opening the UI also triggers a background rescan when the data is older than `PORT_INVENTORY_STALE_SECONDS`. `first_seen` / `last_seen` are tracked per bind: ports first seen in the last 24h are marked **NEW**, and ports that stopped listening are shown as **offline**.
+- **Single file, SQLite.** `app.py` plus Flask; the database survives restarts and upgrades migrate it automatically.
 
 ---
 
 ## Screenshots
 
-![Dashboard](assets/1.png)
-![Dashboard](assets/2.png)
-![Dashboard](assets/3.png)
+_Screenshots of the new UI coming soon._
 
 ---
 
@@ -77,6 +78,7 @@ All configuration is done via environment variables. No config files needed.
 | `PORT_INVENTORY_HOST` | `127.0.0.1` | Host to bind the web UI to |
 | `PORT_INVENTORY_PORT` | `8710` | Port to bind the web UI to |
 | `PORT_INVENTORY_RESCAN_INTERVAL` | `86400` | Auto-rescan interval in seconds (default: 24h) |
+| `PORT_INVENTORY_STALE_SECONDS` | `300` | Opening the UI triggers a background rescan when the last scan is older than this many seconds |
 
 ### Bind address guidance
 
@@ -193,6 +195,8 @@ location /port-inventory/ {
 }
 ```
 
+The page calls the API with relative URLs (`api/...`), so it works under a sub-path. Open it with the trailing slash (`/port-inventory/`).
+
 ---
 
 ## Data
@@ -204,7 +208,94 @@ data/
 └── port_inventory.sqlite3
 ```
 
-The database is safe to back up while the app is running.
+Tables: `port_metadata` (one row per bind), `custom_categories` and `settings` (last scan time and error). Older databases are migrated on startup. The database is safe to back up while the app is running.
+
+---
+
+## API
+
+All routes are under `/api` and speak JSON. Errors come back as `{"error": "message"}` with a 4xx status. Write requests need `Content-Type: application/json`.
+
+A **key** identifies one bind: `<proto>|<address>|<port>`, e.g. `tcp|0.0.0.0|22` or `udp|127.0.0.53%lo|53`. URL-encode it in paths (`tcp%7C0.0.0.0%7C22`).
+
+| Method | Route | Body | Response |
+|---|---|---|---|
+| `GET` | `/api/ports` | — | Payload (below). Runs a first scan if none has happened yet |
+| `PATCH` | `/api/ports/<key>` | Any of `{name, category, notes, ignored}` | `{"port": {...one bind row...}}` |
+| `POST` | `/api/ports/bulk` | `{"keys": [key, ...], "changes": {name?, category?, notes?, ignored?}}` | `{"updated": n, "data": Payload}` |
+| `POST` | `/api/rescan` | — | Payload (scan failures are reported in `scan_error`) |
+| `GET` | `/api/categories` | — | `{"categories": [Category, ...]}` |
+| `POST` | `/api/categories` | `{"name": "Backups"}` | `{"name", "created", "categories"}`: `201` if created, `200` if it already existed (matched case-insensitively) |
+| `DELETE` | `/api/categories/<name>` | — | `{"deleted", "categories"}`. `400` for built-ins, `404` if unknown, `409` while any port uses it |
+
+Field rules: `name` ≤ 100 chars, `category` ≤ 48 chars (an unknown category is created on the fly; casing is matched to an existing one), `notes` ≤ 4000 chars, `ignored` must be a boolean. Unknown fields are rejected. A bulk update is all-or-nothing: if any key is unknown, nothing is saved (`404`).
+
+**Payload**
+
+```jsonc
+{
+  "hostname": "nas",
+  "server_time": "2026-10-05T19:55:20.123+00:00",
+  "last_scan_at": "2026-10-05T19:55:18.456+00:00",   // null before the first scan
+  "scan_error": null,                                // message if the last scan failed
+  "rescan_interval_seconds": 86400,
+  "stale_after_seconds": 300,
+  "stats": {"total": 18, "unnamed": 3, "public": 7, "new": 1, "ignored": 4},  // total/unnamed/public/new exclude ignored groups
+  "categories": [{"name": "Web", "builtin": true, "count": 2}],                // count = groups using it
+  "groups": [Group, ...]
+}
+```
+
+**Group** (one per port + protocol)
+
+```jsonc
+{
+  "id": "tcp-22",                      // also the URL hash for the details drawer
+  "port": 22, "proto": "tcp",
+  "primary_key": "tcp|0.0.0.0|22",     // best listening bind: wildcard IPv4 > :: > specific, then oldest
+  "keys": ["tcp|0.0.0.0|22", "tcp|::|22"],
+  "name": "OpenSSH",                   // a user-typed name wins over the auto-filled one
+  "auto_name": "SSH",                  // well-known name for this port, or ""
+  "other_names": [{"name": "sshd v6", "address": "::"}],  // other user-typed names in the group
+  "category": "Remote Access", "notes": "",
+  "ignored": false,                    // the user's ignore (taken from the primary)
+  "process": "sshd · pid 812",         // summary; "process_full" has the raw ss users:(...) string
+  "scopes": ["public"],                // public | tailscale | lan | specific | loopback, of the listening binds
+  "has_public": true,                  // listening on a public bind right now
+  "first_seen": "...", "last_seen": "...",
+  "is_new": false,                     // first seen within the last 24h
+  "is_online": true,                   // at least one bind was seen in the latest scan
+  "binds": [{
+    "key": "tcp|::|22", "address": "::", "scope": "public", "scope_label": "Public",
+    "online": true,
+    "ignored": false,                  // the user's ignore
+    "auto_ignored": true,              // duplicate bind, recomputed on every scan
+    "name": "SSH", "auto_name": "SSH", "user_name": "",
+    "category": "Remote Access", "notes": "",
+    "process": "users:((\"sshd\",pid=812,fd=4))", "raw": "tcp LISTEN 0 128 [::]:22 ...",
+    "first_seen": "...", "last_seen": "..."
+  }]
+}
+```
+
+---
+
+## Development
+
+The tests are for development only. The app needs nothing but Flask, and the Dockerfile still copies only `app.py`.
+
+**Backend** (pytest, Flask test client, fake `ss` output, throwaway SQLite DBs):
+
+```bash
+./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/python -m pytest
+```
+
+**UI** (the real page in [jsdom](https://github.com/jsdom/jsdom) against a fake-`ss` server; needs Node 18+ and a Python with Flask, taken from `$PYTHON` or `python3`):
+
+```bash
+cd tests/ui && npm install && PYTHON=../../venv/bin/python npm test
+```
 
 ---
 
