@@ -1,5 +1,6 @@
 // UI checks: loads the real page in jsdom against tests/ui/fake_server.py.
 // Groups served: tcp 22 (0.0.0.0 + ::), udp 53 (0.0.0.0 + 127.0.0.53%lo), tcp 631, 4000, 4001, 7777, 8710.
+// tcp 631 (::1 only) and 4001 answer HTTP.
 const { JSDOM, VirtualConsole } = require('jsdom');
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -69,6 +70,24 @@ module.exports = async function run(BASE) {
   check(rowFor(7777).querySelector('.svc-proc').textContent === 'process hidden', 'process hidden label');
   check(rowFor(53, 'udp').querySelector('.svc-proc').textContent === 'systemd-resolve · pid 500', 'process from a live bind');
   check(rowFor(22).querySelector('.svc-proc').textContent === 'sshd · pid 812', 'process + pid');
+
+  // ── open-in-new-tab links for ports that answered HTTP ──
+  const openLink = (port, proto) => rowFor(port, proto).querySelector('a.open-btn');
+  const link = openLink(4001);
+  check(link && link.getAttribute('href') === BASE.replace(/\/$/, '').replace(/:\d+$/, ':4001/'), 'http port links to the page host: ' + (link && link.getAttribute('href')));
+  check(link.target === '_blank' && /noopener/.test(link.rel) && link.querySelector('svg') && /4001/.test(link.getAttribute('aria-label')), 'link opens a new tab, has icon + label');
+  check(openLink(631).getAttribute('href') === 'http://localhost:631/', 'loopback-only port links to localhost');
+  check(!openLink(22) && !openLink(53, 'udp') && !openLink(4000), 'no link for non-HTTP ports');
+  link.addEventListener('click', (e) => e.preventDefault(), { once: true });  // jsdom can't navigate
+  link.click();
+  check(!doc.getElementById('drawer').classList.contains('open'), 'clicking the link does not open the drawer');
+  rowFor(4001).querySelector('.more-btn').click();
+  const dOpen = doc.getElementById('d-open');
+  check(!dOpen.hidden && dOpen.getAttribute('href') === link.getAttribute('href') && dOpen.target === '_blank', 'drawer shows the link');
+  key({ key: 'Escape' });
+  rowFor(22).querySelector('.more-btn').click();
+  check(dOpen.hidden, 'drawer hides the link for non-HTTP ports');
+  key({ key: 'Escape' });
 
   // ── sorting ──
   const ports = () => rows().map((tr) => +tr.querySelector('.port-num').textContent);

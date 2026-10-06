@@ -10,6 +10,7 @@ Features:
 - Well-known ports are auto-named on first sight
 - Duplicate binds of the same port/proto are marked auto_ignored (wildcard bind wins),
   separately from the user's own ignore flag
+- TCP ports serving a web page on localhost get an "open in new tab" link
 - Inline rename, category popover, details drawer, bulk actions, undo
 - JSON API (/api/...) + client-side rendering, filtering and sorting
 - Stores metadata in SQLite, keeps first_seen / last_seen timestamps
@@ -29,6 +30,7 @@ For a systemd service, run as root if you want process names/PIDs from `ss -p`.
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import os
 import re
@@ -37,9 +39,11 @@ import sqlite3
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -54,6 +58,10 @@ PORT = int(os.environ.get("PORT_INVENTORY_PORT", "8710"))
 RESCAN_INTERVAL_SECONDS = int(os.environ.get("PORT_INVENTORY_RESCAN_INTERVAL", str(24 * 3600)))  # default: 24h
 # Opening the UI triggers a background rescan when the last scan is older than this.
 STALE_SECONDS = int(os.environ.get("PORT_INVENTORY_STALE_SECONDS", "300"))
+# Every scan sends `GET /` to each listening TCP port on localhost; 0 turns this off.
+HTTP_PROBE_TIMEOUT = float(os.environ.get("PORT_INVENTORY_HTTP_PROBE_TIMEOUT", "1.5"))
+HTTP_PROBE_HOST = "localhost"
+HTTP_PROBE_WORKERS = 32
 
 NEW_WINDOW = timedelta(hours=24)
 
@@ -146,6 +154,7 @@ CREATE TABLE IF NOT EXISTS {table} (
     notes TEXT NOT NULL DEFAULT '',
     ignored INTEGER NOT NULL DEFAULT 0,
     auto_ignored INTEGER NOT NULL DEFAULT 0,
+    http INTEGER NOT NULL DEFAULT 0,
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
     last_process TEXT NOT NULL DEFAULT '',
@@ -155,7 +164,7 @@ CREATE TABLE IF NOT EXISTS {table} (
 
 PORT_METADATA_COLUMNS = (
     "key", "proto", "local_address", "port", "name", "category", "notes",
-    "ignored", "auto_ignored", "first_seen", "last_seen", "last_process", "last_raw",
+    "ignored", "auto_ignored", "http", "first_seen", "last_seen", "last_process", "last_raw",
 )
 
 # Scope ids, most exposed first (also the client's "Binds" sort order).
@@ -300,6 +309,12 @@ def add_auto_ignored_column(db: sqlite3.Connection) -> None:
             )
 
 
+def add_http_column(db: sqlite3.Connection) -> None:
+    """`http` = the port answered HTTP on localhost in the last scan; filled by the next scan."""
+    if "http" not in table_columns(db, "port_metadata"):
+        db.execute("ALTER TABLE port_metadata ADD COLUMN http INTEGER NOT NULL DEFAULT 0")
+
+
 def migrate_categories(db: sqlite3.Connection) -> None:
     """Normalize category casing and register every in-use custom category."""
     canonical = {name.casefold(): name for name in CATEGORIES}
@@ -322,6 +337,7 @@ def init_db() -> None:
     with db_session() as db:
         db.execute(PORT_METADATA_DDL.format(table="port_metadata"))
         add_auto_ignored_column(db)  # before the legacy rebuild, which copies existing columns only
+        add_http_column(db)
         drop_legacy_columns(db)
         db.execute("CREATE INDEX IF NOT EXISTS idx_port_metadata_port ON port_metadata(port)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_port_metadata_last_seen ON port_metadata(last_seen)")
@@ -435,19 +451,56 @@ def process_summary(process: str) -> str:
     return f"{', '.join(names)} · pid {pid_text}"
 
 
-def sync_scan(entries: Iterable[PortEntry]) -> None:
+def is_browsable(status: int, headers: Message) -> bool:
+    """Would a browser show something useful? An HTML page, a redirect (e.g. to a login
+    page) or an HTTP auth prompt. APIs (JSON / plain-text answers, 404s on /) and
+    HTTPS-only servers rejecting plain HTTP with a 400 don't count."""
+    if 300 <= status < 400:
+        return bool(headers.get("Location"))
+    if status == 401:
+        return bool(headers.get("WWW-Authenticate"))
+    content_type = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    return 200 <= status < 300 and content_type in ("text/html", "application/xhtml+xml")
+
+
+def probe_http(port: int) -> bool:
+    """True if http://localhost:<port>/ answers with something a browser can open."""
+    conn = http.client.HTTPConnection(HTTP_PROBE_HOST, port, timeout=HTTP_PROBE_TIMEOUT)
+    try:
+        conn.request("GET", "/", headers={
+            "User-Agent": "port-inventory", "Accept": "text/html,*/*;q=0.8", "Connection": "close",
+        })
+        response = conn.getresponse()
+        return is_browsable(response.status, response.headers)
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        conn.close()
+
+
+def probe_http_ports(entries: Iterable[PortEntry]) -> set[int]:
+    """Probe every listening TCP port in parallel; returns the ones that speak HTTP."""
+    ports = sorted({e.port for e in entries if e.proto.lower() == "tcp"})
+    if not ports or HTTP_PROBE_TIMEOUT <= 0:
+        return set()
+    with ThreadPoolExecutor(max_workers=min(HTTP_PROBE_WORKERS, len(ports))) as pool:
+        return {port for port, ok in zip(ports, pool.map(probe_http, ports)) if ok}
+
+
+def sync_scan(entries: Iterable[PortEntry], http_ports: set[int] = frozenset()) -> None:
     seen_at = now_iso()
     with db_session() as db:
         for entry in entries:
+            is_http = int(entry.proto.lower() == "tcp" and entry.port in http_ports)
             row = db.execute("SELECT key FROM port_metadata WHERE key = ?", (entry.key,)).fetchone()
             if row:
                 db.execute(
                     """
                     UPDATE port_metadata
-                    SET last_seen = ?, last_process = ?, last_raw = ?
+                    SET last_seen = ?, last_process = ?, last_raw = ?, http = ?
                     WHERE key = ?
                     """,
-                    (seen_at, entry.process, entry.raw, entry.key),
+                    (seen_at, entry.process, entry.raw, is_http, entry.key),
                 )
             else:
                 known = WELL_KNOWN_PORTS.get(entry.port, {})
@@ -455,8 +508,8 @@ def sync_scan(entries: Iterable[PortEntry]) -> None:
                     """
                     INSERT INTO port_metadata
                     (key, proto, local_address, port, name, category, notes,
-                     ignored, first_seen, last_seen, last_process, last_raw)
-                    VALUES (?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?)
+                     ignored, http, first_seen, last_seen, last_process, last_raw)
+                    VALUES (?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?, ?)
                     """,
                     (
                         entry.key,
@@ -465,6 +518,7 @@ def sync_scan(entries: Iterable[PortEntry]) -> None:
                         entry.port,
                         known.get("name", ""),
                         known.get("category", ""),
+                        is_http,
                         seen_at,
                         seen_at,
                         entry.process,
@@ -530,7 +584,7 @@ def run_scan() -> str | None:
             with db_session() as db:
                 set_setting(db, "last_scan_error", str(exc))
             return str(exc)
-        sync_scan(entries)
+        sync_scan(entries, probe_http_ports(entries))
         return None
 
 
@@ -606,6 +660,7 @@ def build_group(rows: list[sqlite3.Row], last_scan_at: str, now: datetime) -> di
         "last_seen": last_seen,
         "is_new": bool(first_dt and first_dt >= now - NEW_WINDOW),
         "is_online": is_online,
+        "http": any(online(r) and r["http"] for r in rows),  # answered HTTP on localhost in the last scan
     }
 
 
@@ -1119,7 +1174,7 @@ TEMPLATE = r"""<!doctype html>
     .col-proto { width: 64px; }
     .col-cat { width: 200px; }
     .col-seen { width: 112px; white-space: nowrap; }
-    .col-more { width: 48px; text-align: right; padding-right: 12px !important; }
+    .col-more { width: 88px; text-align: right; white-space: nowrap; padding-right: 12px !important; }
     .port-num { font-family: var(--mono); font-size: 15px; font-weight: 800; color: var(--accent-text); }
     .proto-tag {
       display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--muted);
@@ -1182,6 +1237,9 @@ TEMPLATE = r"""<!doctype html>
     .bind.is-offline { border-style: dashed; }
     .seen { color: var(--muted); font-size: 12px; }
     .more-btn { font-size: 16px; letter-spacing: 1px; }
+    .open-btn { text-decoration: none; }
+    .open-btn.ghost { color: var(--accent-text); }
+    .col-more .open-btn { margin-right: 4px; }
 
     .empty { padding: 48px 16px; text-align: center; color: var(--muted); }
     .empty-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
@@ -1218,6 +1276,7 @@ TEMPLATE = r"""<!doctype html>
     }
     .drawer-port { display: flex; align-items: center; gap: 8px; }
     .drawer-port .port-num { font-size: 20px; }
+    .drawer-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
     .drawer-head h2 { font-size: 16px; font-weight: 700; color: var(--heading); margin-top: 4px; word-break: break-word; }
     .drawer-body { flex: 1; overflow-y: auto; padding: 16px 24px 32px; display: flex; flex-direction: column; gap: 16px; }
     .field { display: flex; flex-direction: column; gap: 4px; }
@@ -1325,7 +1384,7 @@ TEMPLATE = r"""<!doctype html>
       table.ports, .ports tbody { display: block; }
       .ports thead { display: none; }
       .ports tbody tr {
-        display: grid; grid-template-columns: 44px auto minmax(0, 1fr) 44px;
+        display: grid; grid-template-columns: 44px auto minmax(0, 1fr) auto;
         grid-template-areas: "check port svc more" "check proto cat cat" ". . binds binds";
         gap: 4px 8px; align-items: center; padding: 8px; margin-bottom: 8px;
         border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
@@ -1491,7 +1550,10 @@ TEMPLATE = r"""<!doctype html>
       <div class="drawer-port"><span id="d-port" class="port-num"></span><span id="d-proto" class="proto-tag"></span><span id="d-pills"></span></div>
       <h2 id="d-title"></h2>
     </div>
-    <button type="button" id="drawer-close" class="icon-btn ghost" aria-label="Close details">✕</button>
+    <div class="drawer-actions">
+      <a id="d-open" class="icon-btn ghost open-btn" target="_blank" rel="noopener noreferrer" hidden></a>
+      <button type="button" id="drawer-close" class="icon-btn ghost" aria-label="Close details">✕</button>
+    </div>
   </div>
   <div class="drawer-body">
     <label class="field">
@@ -1626,6 +1688,26 @@ TEMPLATE = r"""<!doctype html>
     }
     if (children) for (const c of children) if (c) node.append(c);
     return node;
+  }
+
+  const OPEN_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>';
+
+  // The server probed http://localhost:<port>; open it on the host this page was loaded
+  // from, so the link also works from another machine. Loopback-only ports stay on localhost.
+  function httpUrl(g) {
+    const loopbackOnly = g.scopes.length > 0 && g.scopes.every((s) => s === 'loopback');
+    let host = loopbackOnly ? 'localhost' : (location.hostname || 'localhost');
+    if (host.includes(':') && !host.startsWith('[')) host = '[' + host + ']';
+    return 'http://' + host + ':' + g.port + '/';
+  }
+
+  function fillOpenLink(a, g) {
+    const url = httpUrl(g);
+    a.href = url;
+    a.title = 'Open ' + url + ' in a new tab';
+    a.setAttribute('aria-label', 'Open port ' + g.port + ' in a new tab');
+    a.innerHTML = OPEN_ICON;
+    return a;
   }
 
   function hashString(s) {
@@ -2053,6 +2135,7 @@ TEMPLATE = r"""<!doctype html>
 
     tr.append(h('td', { className: 'col-seen' }, [relNode('span', g.last_seen, 'seen')]));
     tr.append(h('td', { className: 'col-more' }, [
+      g.http && fillOpenLink(h('a', { className: 'icon-btn ghost open-btn', target: '_blank', rel: 'noopener noreferrer' }), g),
       h('button', { type: 'button', className: 'icon-btn ghost more-btn', text: '⋯', 'aria-label': 'Details for port ' + label(g) }),
     ]));
     return tr;
@@ -2374,6 +2457,9 @@ TEMPLATE = r"""<!doctype html>
     if (!g.is_online) pills.append(h('span', { className: 'pill pill-offline', text: 'offline' }));
     if (g.ignored) pills.append(h('span', { className: 'pill pill-ignored', text: 'ignored' }));
     $('d-title').textContent = g.name || 'Unnamed service';
+    const open = $('d-open');
+    open.hidden = !g.http;
+    if (g.http) fillOpenLink(open, g);
 
     const name = $('d-name');
     if (document.activeElement !== name) name.value = g.name;
@@ -2465,7 +2551,7 @@ TEMPLATE = r"""<!doctype html>
       if (!tr || !tr._key) return;
       const key = tr._key;
       const g = state.groups.get(key);
-      if (e.target.closest('.name-input')) return;
+      if (e.target.closest('.name-input, .open-btn')) return;
       if (e.target.closest('.col-check')) {
         const cb = tr.querySelector('.row-check');
         if (e.target !== cb) cb.checked = !cb.checked;
@@ -2590,7 +2676,7 @@ TEMPLATE = r"""<!doctype html>
   }
 
   function trapFocus(e, container) {
-    const items = [...container.querySelectorAll('button, input, textarea, select, [tabindex="0"]')]
+    const items = [...container.querySelectorAll('a[href], button, input, textarea, select, [tabindex="0"]')]
       .filter((el) => !el.disabled && el.offsetParent !== null);
     if (!items.length) return;
     const first = items[0];

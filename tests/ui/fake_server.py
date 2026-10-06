@@ -1,9 +1,12 @@
 """Serve app.py on 127.0.0.1:<port> with a fake `ss` and a throwaway DB (UI tests only)."""
 
+import os
 import shutil
 import signal
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,9 +31,21 @@ if __name__ == "__main__":
     data_dir = Path(tempfile.mkdtemp(prefix="port-inventory-ui-"))
     # run.js stops the server with SIGTERM; clean up the throwaway DB on the way out
     signal.signal(signal.SIGTERM, lambda *_: (shutil.rmtree(data_dir, ignore_errors=True), sys.exit(0)))
+
+    # If run.js dies without stopping us (Ctrl+C, timeout, crash), don't linger as an orphan
+    parent = os.getppid()
+
+    def exit_with_parent():
+        while os.getppid() == parent:
+            time.sleep(0.5)
+        shutil.rmtree(data_dir, ignore_errors=True)
+        os._exit(0)
+
+    threading.Thread(target=exit_with_parent, daemon=True).start()
     app.APP_DIR = data_dir
     app.DB_PATH = data_dir / "ui.sqlite3"
     app.run_ss = lambda: SS_OUTPUT
+    app.probe_http = lambda port: port in (631, 4001)  # never probe real local ports
     app.init_db()
     app.run_scan()
     app.app.run(host="127.0.0.1", port=port)

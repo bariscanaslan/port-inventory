@@ -31,6 +31,7 @@ async function waitUntilUp(base, server, log) {
   const base = 'http://127.0.0.1:' + port + '/';
   const log = [];
   const server = spawn(process.env.PYTHON || 'python3', [path.join(__dirname, 'fake_server.py'), String(port)], { stdio: ['ignore', 'pipe', 'pipe'] });
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { server.kill(); process.exit(130); });
   server.stdout.on('data', (d) => log.push(String(d)));
   server.stderr.on('data', (d) => log.push(String(d)));
   let code = 0;

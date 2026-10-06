@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote
 
 import pytest
 
-from conftest import LEGACY_DDL, PRE_AUTO_DDL, ROOT, SS_OUTPUT, make_db, read_rows
+from conftest import LEGACY_DDL, PRE_AUTO_DDL, ROOT, SS_OUTPUT, make_db, read_rows, real_probe_http
 
 
 def groups(payload: dict) -> dict[str, dict]:
@@ -198,6 +201,134 @@ def test_stale_seconds_in_payload(client, app, monkeypatch):
     assert get(client)["stale_after_seconds"] == 60
 
 
+# ── HTTP probe ───────────────────────────────────────────────────────────────
+
+def test_http_ports_are_flagged(client, db_path, fake_http):
+    G = groups(get(client))
+    assert sorted(fake_http.probed) == [22, 631, 7777, 8710], "each TCP port once, never UDP"
+    assert G["tcp-8710"]["http"]
+    assert not any(G[g]["http"] for g in ("tcp-22", "udp-53", "tcp-631", "tcp-7777"))
+    assert read_rows(db_path)["tcp|127.0.0.1|8710"]["http"] == 1
+
+
+def test_http_flag_follows_rescans(client, fake_ss, fake_http):
+    get(client)
+    fake_http.ports = {22}
+    G = groups(rescan(client))
+    assert G["tcp-22"]["http"] and not G["tcp-8710"]["http"]
+
+    fake_ss.remove("0.0.0.0:22 ")
+    fake_ss.remove("[::]:22 ")
+    assert not groups(rescan(client))["tcp-22"]["http"], "offline ports have no link"
+
+
+def test_udp_port_never_flagged_even_if_tcp_twin_speaks_http(client, fake_ss, fake_http):
+    fake_ss.add('udp UNCONN 0 0 0.0.0.0:8710 0.0.0.0:*')
+    G = groups(get(client))
+    assert G["tcp-8710"]["http"] and not G["udp-8710"]["http"]
+
+
+def test_http_probe_disabled_by_zero_timeout(client, app, fake_http, monkeypatch):
+    monkeypatch.setattr(app, "HTTP_PROBE_TIMEOUT", 0)
+    assert not any(g["http"] for g in get(client)["groups"])
+    assert fake_http.probed == []
+
+
+def test_http_probe_timeout_from_environment():
+    env = dict(os.environ, PORT_INVENTORY_HTTP_PROBE_TIMEOUT="0.25")
+    out = subprocess.run(
+        [sys.executable, "-c", "import app; print(app.HTTP_PROBE_TIMEOUT)"],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "0.25"
+
+
+# (status, headers, body) served on GET / -> is it a web page a browser can open?
+PROBE_CASES = {
+    "html page": ((200, {"Content-Type": "text/html; charset=utf-8"}, b"<!doctype html>"), True),
+    "xhtml page": ((200, {"Content-Type": "application/xhtml+xml"}, b"<html/>"), True),
+    "redirect to login": ((302, {"Location": "/login"}, b""), True),
+    "basic auth prompt": ((401, {"WWW-Authenticate": 'Basic realm="x"'}, b""), True),
+    # llama.cpp / ollama runner: an API, nothing to see in a browser
+    "json 404 api": ((404, {"Content-Type": "application/json"}, b'{"error":"File Not Found"}'), False),
+    "plain-text api": ((200, {"Content-Type": "text/plain"}, b"Ollama is running"), False),
+    "json 200 api": ((200, {"Content-Type": "application/json"}, b"{}"), False),
+    "html 404": ((404, {"Content-Type": "text/html"}, b"<h1>Not Found</h1>"), False),
+    "redirect without location": ((302, {}, b""), False),
+    "401 without auth prompt": ((401, {"Content-Type": "application/json"}, b"{}"), False),
+    # what Go's TLS server says to plain HTTP: an http:// link would break
+    "https-only server": ((400, {"Content-Type": "text/plain"}, b"Client sent an HTTP request to an HTTPS server."), False),
+}
+
+
+@pytest.fixture
+def web_servers():
+    """One local HTTP server per PROBE_CASES entry; yields {case: port}."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, headers, body = self.server.reply
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    servers = {}
+    for case, (reply, _) in PROBE_CASES.items():
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.reply = reply
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers[case] = server
+    yield {case: server.server_address[1] for case, server in servers.items()}
+    for server in servers.values():
+        server.shutdown()
+        server.server_close()
+
+
+def test_real_probe_only_counts_web_pages(app, monkeypatch, web_servers):
+    monkeypatch.setattr(app, "HTTP_PROBE_HOST", "127.0.0.1")
+    monkeypatch.setattr(app, "HTTP_PROBE_TIMEOUT", 1.0)
+    got = {case: real_probe_http(port) for case, port in web_servers.items()}
+    assert got == {case: expected for case, (_, expected) in PROBE_CASES.items()}
+
+
+def test_real_probe_ignores_non_http_and_closed_ports(app, monkeypatch):
+    monkeypatch.setattr(app, "HTTP_PROBE_HOST", "127.0.0.1")
+    monkeypatch.setattr(app, "HTTP_PROBE_TIMEOUT", 1.0)
+
+    # A non-HTTP service that greets first, like SSH
+    banner = socket.socket()
+    banner.bind(("127.0.0.1", 0))
+    banner.listen()
+
+    def greet():
+        while True:
+            try:
+                conn, _ = banner.accept()
+            except OSError:
+                return
+            conn.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+            conn.close()
+
+    threading.Thread(target=greet, daemon=True).start()
+
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    closed_port = closed.getsockname()[1]
+    closed.close()
+
+    try:
+        assert real_probe_http(banner.getsockname()[1]) is False
+        assert real_probe_http(closed_port) is False
+    finally:
+        banner.close()
+
+
 @pytest.mark.parametrize("addr,scope", [
     ("0.0.0.0", "public"), ("*", "public"), ("::", "public"),
     ("127.0.0.1", "loopback"), ("127.0.0.53%lo", "loopback"), ("::1", "loopback"),
@@ -234,7 +365,7 @@ def test_migrate_legacy_schema(db_path, fake_ss, app):
     with app.db_session() as db:
         cols = app.table_columns(db, "port_metadata")
         custom = [r["name"] for r in db.execute("SELECT name FROM custom_categories")]
-    assert "owner" not in cols and "exposure" not in cols and "auto_ignored" in cols
+    assert "owner" not in cols and "exposure" not in cols and {"auto_ignored", "http"} <= cols
     assert custom == ["Home Lab"]
     rows = read_rows(db_path)
     assert rows["tcp|0.0.0.0|22"]["category"] == "Remote Access"  # casing normalized

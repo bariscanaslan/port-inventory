@@ -69,6 +69,30 @@ class FakeSS:
         self.output += line.rstrip("\n") + "\n"
 
 
+class FakeHTTP:
+    """Stands in for app.probe_http so tests never touch real local ports.
+    Ports in `.ports` answer HTTP; every probed port is recorded in `.probed`."""
+
+    def __init__(self) -> None:
+        self.ports: set[int] = {8710}
+        self.probed: list[int] = []
+
+    def __call__(self, port: int) -> bool:
+        self.probed.append(port)
+        return port in self.ports
+
+
+# The real probe, kept for the tests that run it against local test servers.
+real_probe_http = app_module.probe_http
+
+
+@pytest.fixture(autouse=True)
+def fake_http(monkeypatch):
+    probe = FakeHTTP()
+    monkeypatch.setattr(app_module, "probe_http", probe)
+    return probe
+
+
 @pytest.fixture
 def app():
     return app_module

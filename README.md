@@ -16,6 +16,7 @@ Reads live data from `ss -tulpn`, persists metadata in SQLite, and lets you name
 - **One row per service.** Every bind of the same port/protocol (`0.0.0.0` + `::`, or a wildcard plus a loopback bind) is grouped into one row, with a chip per bind address colored by scope: public, LAN, loopback, Tailscale.
 - **Auto-naming.** Well-known ports (SSH, DNS, HTTP(S), PostgreSQL, Redis, WireGuard, …) are named and categorized the first time they're seen. Anything you type yourself is never overwritten.
 - **Duplicate-bind detection.** After every scan, the widest bind that is listening becomes the group's primary. Other listening binds are marked as duplicates and shown as faded chips. This is tracked separately from your own *Ignore*: if the primary stops listening, the next listening bind takes over at full opacity.
+- **Open web UIs in one click.** Every scan sends `GET /` to each listening TCP port on `localhost` (in parallel, short timeout). Ports that serve something a browser can open (an HTML page, a redirect such as a login page, or an HTTP auth prompt) get an open-in-new-tab button on their row and in the details drawer. APIs that answer with JSON or plain text, and HTTPS-only servers that reject plain HTTP, get no link. The link uses the host you opened Port Inventory on, or `localhost` for loopback-only ports.
 - **Categories.** 18 built-in categories plus your own. Create one from the category popover, and delete it again once no port uses it. Each category gets a stable color.
 - **Fast editing.** Click a service name to rename it inline (Enter saves, Esc cancels). Click the category chip to change it. Every change saves immediately and shows a toast with **Undo**.
 - **Details drawer.** Click a row for notes (saved when you leave the field), the ignore toggle, every bind with its scope and status, the full process string, and the raw `ss` lines with a copy button. The drawer is linked from the URL (`#tcp-22`), so links and reloads reopen it.
@@ -79,6 +80,7 @@ All configuration is done via environment variables. No config files needed.
 | `PORT_INVENTORY_PORT` | `8710` | Port to bind the web UI to |
 | `PORT_INVENTORY_RESCAN_INTERVAL` | `86400` | Auto-rescan interval in seconds (default: 24h) |
 | `PORT_INVENTORY_STALE_SECONDS` | `300` | Opening the UI triggers a background rescan when the last scan is older than this many seconds |
+| `PORT_INVENTORY_HTTP_PROBE_TIMEOUT` | `1.5` | Seconds to wait for each port's HTTP answer during a scan; `0` turns the HTTP check off |
 
 ### Bind address guidance
 
